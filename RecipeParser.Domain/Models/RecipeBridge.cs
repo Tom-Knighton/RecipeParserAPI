@@ -31,3 +31,4 @@ public sealed record InstructionResult(
 );
 public sealed record TimeItem(int TimeInSeconds, string TimeUnitText, string TimeText);
 public sealed record AlternativeTemp(decimal Quantity, string Unit, decimal MinQuantity, decimal MaxQuantity);
+public sealed record RecipeEnrichmentResult(IngredientResult[] Ingredients, InstructionResult[] Instructions);

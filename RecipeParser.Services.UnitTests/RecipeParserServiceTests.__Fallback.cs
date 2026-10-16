@@ -81,6 +81,17 @@ public class RecipeParserServiceFallbackTests
                 Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new InstructionResult(null, [], null, null, null, null, null)));
 
+        node.InvokeFromFileAsync<RecipeEnrichmentResult>(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<object[]>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var args = call.ArgAt<object[]>(2);
+                var ingredients = (string[])args[0];
+                var instructions = (string[])args[1];
+                return Task.FromResult<RecipeEnrichmentResult?>(new RecipeEnrichmentResult(
+                    ingredients.Select(line => new IngredientResult(null, null, null, null, null, null, line, null, line, [])).ToArray(),
+                    instructions.Select(_ => new InstructionResult(null, [], null, null, null, null, null)).ToArray()));
+            });
         return node;
     }
 

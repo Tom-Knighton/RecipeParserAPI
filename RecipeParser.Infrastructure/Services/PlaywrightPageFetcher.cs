@@ -22,22 +22,45 @@ public sealed class PlaywrightPageFetcher(IPlaywrightBrowser browser, HttpClient
 
     public async Task<IReadOnlyList<string>> GetRenderedJsonLdAsync(string url, TimeSpan timeout, CancellationToken ct = default)
     {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(timeout);
         var ctx = await browser.NewContextAsync(new()
         {
             UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-        });
-        var page = await ctx.NewPageAsync();
-        await page.GotoAsync(url, new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = (float)timeout.TotalMilliseconds });
+        }, budget.Token);
+        try
+        {
+            budget.Token.ThrowIfCancellationRequested();
+            await ctx.RouteAsync("**/*", route =>
+                route.Request.ResourceType is "image" or "media" or "font"
+                    ? route.AbortAsync()
+                    : route.ContinueAsync());
+            var page = await ctx.NewPageAsync();
+            page.SetDefaultTimeout((float)timeout.TotalMilliseconds);
+            await page.GotoAsync(url, new()
+            {
+                WaitUntil = WaitUntilState.DOMContentLoaded,
+                Timeout = (float)timeout.TotalMilliseconds
+            }).WaitAsync(budget.Token);
 
-        try { await page.ClickAsync("button:has-text('Accept all')", new() { Timeout = 10 }); } catch { /* ignore */ }
+            // JSON-LD may be injected after DOMContentLoaded.
+            try
+            {
+                await page.WaitForFunctionAsync("""
+                    () => [...document.querySelectorAll('script[type="application/ld+json"]')]
+                        .some(node => /"(?:https?:\/\/schema\.org\/)?Recipe"/i.test(node.textContent || ''))
+                    """, options: new() { Timeout = 1500 }).WaitAsync(budget.Token);
+            }
+            catch (System.TimeoutException) { }
 
-        try { await page.WaitForSelectorAsync("script[type='application/ld+json']", new() { Timeout = 10 }); } catch { /* ok if none */ }
-
-        var jsons = await page.EvalOnSelectorAllAsync<string[]>(
-            "script[type='application/ld+json']",
-            "nodes => nodes.map(n => n.textContent ?? '')");
-
-        await ctx.CloseAsync();
-        return jsons.Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
+            var jsons = await page.EvalOnSelectorAllAsync<string[]>(
+                "script[type='application/ld+json']",
+                "nodes => nodes.map(n => n.textContent ?? '')").WaitAsync(budget.Token);
+            return jsons.Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
+        }
+        finally
+        {
+            await ctx.CloseAsync();
+        }
     }
 }

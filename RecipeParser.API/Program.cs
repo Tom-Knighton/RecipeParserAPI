@@ -1,4 +1,3 @@
-using System.Net;
 using System.Reflection;
 using Jering.Javascript.NodeJS;
 using Microsoft.OpenApi.Models;
@@ -6,7 +5,6 @@ using RecipeParser.Application;
 using RecipeParser.Application.Services;
 using RecipeParser.Domain.Interfaces;
 using RecipeParser.Infrastructure;
-using HttpVersion = System.Net.HttpVersion;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -25,24 +23,6 @@ builder.Services.AddControllers();
 
 builder.Services.AddRecipeParserApplication();
 builder.Services.AddRecipeParserInfrastructure(builder.Configuration);
-
-builder.Services.AddHttpClient("recipe-fetcher", client =>
-{
-    client.Timeout = TimeSpan.FromSeconds(30);
-    client.DefaultRequestVersion = HttpVersion.Version30;
-    client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
-    
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("RecipeParser/1.0 (+https://tomk.online) Mozilla/5.0");
-    client.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml");
-    client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("gzip, br, deflate");
-    client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-GB,en;q=0.8");
-}) .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-{
-    AutomaticDecompression = DecompressionMethods.All,
-    AllowAutoRedirect = true,
-    UseCookies = true,
-    MaxConnectionsPerServer = 8
-});
 
 builder.Services.Configure<NodeJSProcessOptions>(opts =>
 {

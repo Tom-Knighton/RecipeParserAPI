@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
+using Microsoft.Extensions.Options;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -16,105 +19,102 @@ public partial class RecipeParserService(
     INodeJSService node,
     IPageFetcher fetcher,
     IRecipeDescriptionParser? descriptionParser = null,
-    ILogger<RecipeParserService>? logger = null): IRecipeParserService
+    ILogger<RecipeParserService>? logger = null,
+    IOptions<ParserPerformanceOptions>? performanceOptions = null): IRecipeParserService
 {
-    public async Task<Recipe> ParseRecipeByUrl(string url)
+    private static readonly Meter Meter = new("Sporkast.RecipeParser");
+    private static readonly Histogram<double> StageDuration = Meter.CreateHistogram<double>("recipe.parse.stage.duration", "ms");
+    private readonly ParserPerformanceOptions performance = performanceOptions?.Value ?? new();
+
+    public async Task<Recipe> ParseRecipeByUrl(string url, CancellationToken ct = default)
     {
-        Recipe? recipe = null;
-        if (url.StartsWith("https://www.instagram.com/reel/") || url.StartsWith("https://www.tiktok.com/@"))
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(performance.TotalTimeoutSeconds));
+        return await Measure("total", url, async () =>
         {
-            recipe = await TryParseSocialPost(url);
-        }
-        else
-        {
-            recipe = await TryParseSchema(url);
-        }
+            var token = deadline.Token;
+            var source = new Uri(url, UriKind.Absolute);
+            Recipe? recipe;
+            if (source.Host.Equals("www.instagram.com", StringComparison.OrdinalIgnoreCase)
+                || source.Host.Equals("instagram.com", StringComparison.OrdinalIgnoreCase)
+                || source.Host.Equals("www.tiktok.com", StringComparison.OrdinalIgnoreCase)
+                || source.Host.Equals("tiktok.com", StringComparison.OrdinalIgnoreCase)
+                || source.Host.EndsWith(".tiktok.com", StringComparison.OrdinalIgnoreCase))
+                recipe = await TryParseSocialPost(url, token);
+            else
+                recipe = await TryParseSchema(url, token);
 
-        if (recipe is null)
-            throw new NoRecipeFoundException();
+            if (recipe is null) throw new NoRecipeFoundException();
 
-        var ingredientTasks = recipe.RawIngredients
-            .Select(async ingredient =>
+            var steps = recipe.StepSections.SelectMany(section => section.Steps ?? []).ToArray();
+            var batch = await Measure("enrichment", url, () => node.InvokeFromFileAsync<RecipeEnrichmentResult>(
+                "recipeParser.cjs", exportName: "parseRecipe",
+                args: new object?[] { recipe.RawIngredients.ToArray(), steps.Select(step => step.Step).ToArray(), "en" },
+                cancellationToken: token));
+            if (batch is null || batch.Ingredients.Length != recipe.RawIngredients.Count || batch.Instructions.Length != steps.Length)
+                throw new InvalidOperationException("Recipe enrichment returned an incomplete result.");
+
+            recipe.Ingredients = batch.Ingredients.ToList();
+            for (var index = 0; index < steps.Length; index++)
             {
-                var result = await node.InvokeFromFileAsync<IngredientResult>(
-                    "recipeParser.cjs",
-                    exportName: "parseIngredientLine",
-                    args: new object?[] { ingredient, "en", new { } }
-                );
-                return (ingredient, result);
-            })
-            .ToList();
-
-        var ingredientResults = await Task.WhenAll(ingredientTasks);
-        foreach (var (_, result) in ingredientResults)
-        {
-            if (result is not null)
-                recipe.Ingredients.Add(result);
-        }
-
-        var stepTasks = new List<Task<(RecipeStep step, InstructionResult? result)>>();
-        foreach (var stepSection in recipe.StepSections ?? [])
-        {
-            foreach (var step in stepSection.Steps ?? [])
-            {
-                var stepCopy = step;
-                stepTasks.Add(
-                    node.InvokeFromFileAsync<InstructionResult>(
-                        "recipeParser.cjs",
-                        exportName: "parseInstructionLine",
-                        args: new object?[] { step.Step, "en", new { } }
-                    ).ContinueWith(t => (stepCopy, t.Result))
-                );
-            }
-        }
-
-        var stepResults = await Task.WhenAll(stepTasks);
-        foreach (var (step, result) in stepResults)
-        {
-            if (result?.TimeItems.Length > 0)
-            {
+                var step = steps[index];
+                var result = batch.Instructions[index];
                 step.Times = result.TimeItems.Select(t => new RecipeStepTime
                 {
-                    TimeInSeconds = t.TimeInSeconds,
-                    TimeText = t.TimeText,
-                    TimeUnitText = t.TimeUnitText
+                    TimeInSeconds = t.TimeInSeconds, TimeText = t.TimeText, TimeUnitText = t.TimeUnitText
                 }).ToList();
+                if (result.Temperature is not null and not 0)
+                    step.Temperatures.Add(new RecipeStepTemperature
+                    {
+                        Temperature = result.Temperature.Value,
+                        TemperatureText = result.TemperatureText ?? "",
+                        TemperatureUnitText = result.TemperatureUnitText ?? ""
+                    });
             }
-
-            if (result?.Temperature is not null and not 0)
-            {
-                step.Temperatures.Add(new RecipeStepTemperature()
-                {
-                    Temperature = result.Temperature ?? 0,
-                    TemperatureText = result.TemperatureText ?? "",
-                    TemperatureUnitText = result.TemperatureUnitText ?? ""
-                });
-            }
-        }
-        
-        return recipe;
+            return recipe;
+        });
     }
 
-    private async Task<Recipe?> TryParseSchema(string url)
+    private async Task<T> Measure<T>(string stage, string url, Func<Task<T>> action)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var outcome = "success";
+        try { return await action(); }
+        catch { outcome = "failure"; throw; }
+        finally
+        {
+            var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            var host = new Uri(url).Host;
+            StageDuration.Record(elapsed, new("stage", stage), new("host", host), new("outcome", outcome));
+            logger?.LogInformation("Recipe stage {Stage} for {Host}: {DurationMs}ms ({Outcome})", stage, host, elapsed, outcome);
+        }
+    }
+
+    private async Task<Recipe?> TryParseSchema(string url, CancellationToken ct)
     {
         var sourceUri = Uri.TryCreate(url, UriKind.Absolute, out var parsedUri) ? parsedUri : null;
         if (sourceUri is not null)
         {
-            var apiRecipe = await TryParseTasteOfHomeApi(sourceUri);
+            var apiRecipe = await TryParseTasteOfHomeApi(sourceUri, ct);
             if (apiRecipe is not null)
                 return apiRecipe;
         }
 
         HttpRequestException? staticFetchException = null;
 
+        if (sourceUri is not null && performance.RenderedFirstHosts.Contains(sourceUri.Host, StringComparer.OrdinalIgnoreCase))
+            return await ParseRendered(url, ct);
+
         try
         {
-            var staticHtml = await fetcher.GetStaticHtmlAsync(url);
-            var staticScripts = ExtractLdJsonStrings(staticHtml);
-
-            var recipeNodes = CollectRecipeNodes(staticScripts);
-            if (IsComplete(recipeNodes))
-                return MapRecipeFromSchema(MergeRecipeNodes(recipeNodes), url);
+            var staticHtml = await Measure("static-fetch", url, () => fetcher.GetStaticHtmlAsync(url, ct));
+            var staticRecipe = await Measure("metadata", url, async () =>
+            {
+                var staticScripts = await ExtractLdJsonStrings(staticHtml, ct);
+                var recipeNodes = CollectRecipeNodes(staticScripts);
+                return IsComplete(recipeNodes) ? MapRecipeFromSchema(MergeRecipeNodes(recipeNodes), url) : null;
+            });
+            if (staticRecipe is not null) return staticRecipe;
         }
         catch (HttpRequestException ex) when (ShouldTryRenderedFallback(ex.StatusCode))
         {
@@ -125,15 +125,19 @@ public partial class RecipeParserService(
                 ex.StatusCode);
             staticFetchException = ex;
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            logger?.LogInformation("Static fetch timed out for {Host}; trying browser fallback.", sourceUri?.Host);
+        }
 
         List<JsonObject> renderedNodes;
         try
         {
             logger?.LogInformation("Trying rendered JSON-LD fallback for {Url}.", url);
-            var renderedScripts = await fetcher.GetRenderedJsonLdAsync(url, timeout: TimeSpan.FromSeconds(15));
+            var renderedScripts = await Measure("browser-fetch", url, () => fetcher.GetRenderedJsonLdAsync(url, TimeSpan.FromSeconds(performance.RenderedTimeoutSeconds), ct));
             renderedNodes = CollectRecipeNodes(renderedScripts);
         }
-        catch (Exception ex) when (staticFetchException is not null)
+        catch (Exception ex) when (staticFetchException is not null && !ct.IsCancellationRequested)
         {
             logger?.LogWarning(
                 ex,
@@ -161,7 +165,15 @@ public partial class RecipeParserService(
         return null;
     }
 
-    private async Task<Recipe?> TryParseTasteOfHomeApi(Uri sourceUri)
+    private async Task<Recipe?> ParseRendered(string url, CancellationToken ct)
+    {
+        var scripts = await Measure("browser-fetch", url, () => fetcher.GetRenderedJsonLdAsync(
+            url, TimeSpan.FromSeconds(performance.RenderedTimeoutSeconds), ct));
+        var nodes = CollectRecipeNodes(scripts);
+        return nodes.Count == 0 ? null : MapRecipeFromSchema(MergeRecipeNodes(nodes), url);
+    }
+
+    private async Task<Recipe?> TryParseTasteOfHomeApi(Uri sourceUri, CancellationToken ct)
     {
         if (!IsTasteOfHomeRecipeUrl(sourceUri, out var slug))
             return null;
@@ -170,7 +182,7 @@ public partial class RecipeParserService(
         try
         {
             logger?.LogInformation("Trying Taste of Home recipe API {ApiUrl} for {Url}.", apiUrl, sourceUri);
-            var json = await fetcher.GetStaticHtmlAsync(apiUrl);
+            var json = await Measure("publisher-api", apiUrl, () => fetcher.GetStaticHtmlAsync(apiUrl, ct));
             var root = JsonNode.Parse(json);
             var post = root is JsonArray posts ? posts.OfType<JsonObject>().FirstOrDefault() : root as JsonObject;
             if (post?["recipe_schema"] is not JsonObject schema)
@@ -187,7 +199,7 @@ public partial class RecipeParserService(
 
             return recipe;
         }
-        catch (Exception ex) when (ex is HttpRequestException or JsonException)
+        catch (Exception ex) when ((ex is HttpRequestException or JsonException or OperationCanceledException) && !ct.IsCancellationRequested)
         {
             logger?.LogInformation(ex, "Taste of Home recipe API failed for {ApiUrl}; falling back to page parsing.", apiUrl);
             return null;
@@ -216,20 +228,22 @@ public partial class RecipeParserService(
             or HttpStatusCode.TooManyRequests;
     }
 
-    private async Task<Recipe?> TryParseSocialPost(string url)
+    private async Task<Recipe?> TryParseSocialPost(string url, CancellationToken ct)
     {
-        var staticHtml = await fetcher.GetStaticHtmlAsync(url);
-        var post = ExtractSocialPost(staticHtml, url);
+        var staticHtml = await Measure("static-fetch", url, () => fetcher.GetStaticHtmlAsync(url, ct));
+        var post = await ExtractSocialPost(staticHtml, url, ct);
 
-        foreach (var recipeUrl in GetPotentialRecipeUrls(post, url))
+        foreach (var recipeUrl in GetPotentialRecipeUrls(post, url).Take(performance.MaxLinkedPages))
         {
             try
             {
-                var linkedRecipe = await TryParseSchema(recipeUrl);
+                using var linkedDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                linkedDeadline.CancelAfter(TimeSpan.FromSeconds(performance.LinkedPageTimeoutSeconds));
+                var linkedRecipe = await TryParseSchema(recipeUrl, linkedDeadline.Token);
                 if (linkedRecipe is not null)
                     return linkedRecipe;
             }
-            catch
+            catch (Exception) when (!ct.IsCancellationRequested)
             {
                 // Social posts often include dead or tracking-wrapped links. Keep falling back.
             }
@@ -238,14 +252,14 @@ public partial class RecipeParserService(
         if (descriptionParser is null || string.IsNullOrWhiteSpace(post.Description))
             return null;
 
-        return await descriptionParser.ParseRecipeFromDescription(post.Description, url);
+        return await Measure("ai", url, () => descriptionParser.ParseRecipeFromDescription(post.Description, url, ct));
     }
     
-    private static IReadOnlyList<string> ExtractLdJsonStrings(string html)
+    private static async Task<IReadOnlyList<string>> ExtractLdJsonStrings(string html, CancellationToken ct)
     {
         var list = new List<string>();
-        var doc = AngleSharp.BrowsingContext.New(AngleSharp.Configuration.Default)
-            .OpenAsync(req => req.Content(html)).GetAwaiter().GetResult();
+        using var context = AngleSharp.BrowsingContext.New(AngleSharp.Configuration.Default);
+        using var doc = await context.OpenAsync(req => req.Content(html), ct);
         foreach (var s in doc.QuerySelectorAll("script[type='application/ld+json']"))
         {
             var txt = s.TextContent;
@@ -254,10 +268,10 @@ public partial class RecipeParserService(
         return list;
     }
 
-    private static SocialPost ExtractSocialPost(string html, string sourceUrl)
+    private static async Task<SocialPost> ExtractSocialPost(string html, string sourceUrl, CancellationToken ct)
     {
-        var doc = AngleSharp.BrowsingContext.New(AngleSharp.Configuration.Default)
-            .OpenAsync(req => req.Content(html)).GetAwaiter().GetResult();
+        using var context = AngleSharp.BrowsingContext.New(AngleSharp.Configuration.Default);
+        using var doc = await context.OpenAsync(req => req.Content(html), ct);
 
         var description =
             ExtractCaptionFromMeta(doc.QuerySelector("meta[property='og:title']")?.GetAttribute("content"))

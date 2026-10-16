@@ -9,7 +9,8 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddRecipeParserApplication(this IServiceCollection services)
     {
-        services.AddTransient<IRecipeParserService, RecipeParserService>();
+        services.AddTransient<RecipeParserService>();
+        services.AddSingleton<IRecipeParserService, CachedRecipeParserService>();
         services.AddScoped<IDiscoveryProfileService, DiscoveryProfileService>();
         services.AddScoped<IDiscoveryRankingService, DiscoveryRankingService>();
         services.AddScoped<IDiscoveryFeedService, DiscoveryFeedService>();

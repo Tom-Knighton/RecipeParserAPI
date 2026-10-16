@@ -16,13 +16,19 @@ public class ParserController(IRecipeParserService parser): ControllerBase
     [HttpPost("Parse")]
     [ProducesResponseType<Recipe>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<IActionResult> Parse([Required] [FromBody] ParseUrlRequest request)
+    [ProducesResponseType(StatusCodes.Status504GatewayTimeout)]
+    public async Task<IActionResult> Parse([Required] [FromBody] ParseUrlRequest request, CancellationToken ct)
     {
         try
         {
-            var result = await parser.ParseRecipeByUrl(request.Url);
+            var result = await parser.ParseRecipeByUrl(request.Url, ct);
             return Ok(result);
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return StatusCode(StatusCodes.Status504GatewayTimeout, new { error = "Recipe import timed out. Please try again or paste the recipe text." });
+        }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             return BadRequest(new { error = ex.Message });

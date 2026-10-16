@@ -1,4 +1,6 @@
 using System;
+using System.Net;
+using RecipeParser.Domain.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -16,13 +18,26 @@ public static class DependencyInjection
         this IServiceCollection services,
         IConfiguration configuration)
     {
+        services.AddOptions<ParserPerformanceOptions>()
+            .Bind(configuration.GetSection("ParserPerformance"))
+            .Validate(o => o.TotalTimeoutSeconds is >= 1 and <= 120
+                && o.StaticTimeoutSeconds is >= 1 and <= 30
+                && o.RenderedTimeoutSeconds is >= 1 and <= 30
+                && o.LinkedPageTimeoutSeconds is >= 1 and <= 15
+                && o.MaxLinkedPages is >= 0 and <= 5, "Invalid parser performance limits")
+            .ValidateOnStart();
         services.AddSingleton<IPlaywrightBrowser, PlaywrightBrowser>();
-        services.AddHttpClient<IPageFetcher, PlaywrightPageFetcher>(client =>
+        services.AddHttpClient<IPageFetcher, PlaywrightPageFetcher>((provider, client) =>
         {
-            client.Timeout = TimeSpan.FromSeconds(30);
+            client.Timeout = TimeSpan.FromSeconds(provider.GetRequiredService<IOptions<ParserPerformanceOptions>>().Value.StaticTimeoutSeconds);
             client.DefaultRequestHeaders.UserAgent.ParseAdd(
                 "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1");
             client.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AutomaticDecompression = DecompressionMethods.All,
+            MaxConnectionsPerServer = 16,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5)
         });
 
         services.Configure<OpenAiRecipeParserOptions>(configuration.GetSection("OpenAI"));
