@@ -1,5 +1,7 @@
 # RecipeParser
 
+See [Azure deployment](docs/azure-deployment.md) for development and production CI/CD, registry credential rotation, database configuration, and custom domains.
+
 ## Discovery Database Migrations
 
 Discovery uses EF Core with Postgres through `DiscoveryDbContext`. All discovery tables are created in the `sporkast` schema.

@@ -1,25 +1,17 @@
-using System.Reflection;
 using Jering.Javascript.NodeJS;
 using Microsoft.OpenApi.Models;
 using RecipeParser.Application;
 using RecipeParser.Application.Services;
 using RecipeParser.Domain.Interfaces;
 using RecipeParser.Infrastructure;
+using RecipeParser.HealthChecks;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var environmentName = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
-builder.Configuration
-    .AddJsonFile("appsettings.json")
-    .AddJsonFile($"appsettings.{environmentName}.json", false)
-    .AddEnvironmentVariables();
-
-if (builder.Environment.IsDevelopment())
-{
-    builder.Configuration.AddUserSecrets(Assembly.GetExecutingAssembly());
-}
-
 builder.Services.AddControllers();
+builder.Services.AddHealthChecks()
+    .AddCheck<DiscoveryHealthCheck>("discovery", tags: ["ready"]);
 
 builder.Services.AddRecipeParserApplication();
 builder.Services.AddRecipeParserInfrastructure(builder.Configuration);
@@ -63,5 +55,10 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
 app.MapControllers();
 app.Run();

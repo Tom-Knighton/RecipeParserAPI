@@ -4,6 +4,9 @@ WORKDIR /app
 
 # Copy csproj and restore as distinct layers
 COPY RecipeParser.API/*.csproj ./RecipeParser.API/
+COPY RecipeParser.Application/*.csproj ./RecipeParser.Application/
+COPY RecipeParser.Domain/*.csproj ./RecipeParser.Domain/
+COPY RecipeParser.Infrastructure/*.csproj ./RecipeParser.Infrastructure/
 RUN dotnet restore ./RecipeParser.API/RecipeParser.API.csproj
 
 # --- Node install & npm ci ---
@@ -38,8 +41,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends nodejs ca-certificates \
  && if [ ! -e /usr/bin/node ] && [ -e /usr/bin/nodejs ]; then ln -s /usr/bin/nodejs /usr/bin/node; fi \
  && rm -rf /var/lib/apt/lists/*
-
-COPY --from=build /out ./
 
 COPY --from=build /out ./
 

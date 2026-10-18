@@ -1,0 +1,109 @@
+name: Deploy API to Azure
+
+on:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment (deploys the selected branch)
+        type: choice
+        options: [development, production]
+        default: development
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: azure-${{ inputs.environment || (github.ref_name == 'main' && 'production' || 'development') }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ inputs.environment || (github.ref_name == 'main' && 'production' || 'development') }}
+    env:
+      DEPLOY_ENVIRONMENT: ${{ inputs.environment || (github.ref_name == 'main' && 'production' || 'development') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test deployment configuration
+        run: python3 scripts/test-deploy-azure.py
+
+      - name: Validate deployment configuration
+        env:
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          DISCOVERY_CONNECTION_STRING: ${{ secrets.DISCOVERY_CONNECTION_STRING }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
+        run: |
+          for name in GHCR_READ_TOKEN DISCOVERY_CONNECTION_STRING AZURE_CLIENT_ID GHCR_USERNAME; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing $name for $DEPLOY_ENVIRONMENT"
+              exit 1
+            fi
+          done
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test deployment dependencies
+        run: >-
+          dotnet test RecipeParser.Services.UnitTests/RecipeParser.Services.UnitTests.csproj
+          --configuration Release
+          --filter 'FullyQualifiedName~ParserPerformanceTests|FullyQualifiedName~DiscoveryServiceTests|FullyQualifiedName~PlaywrightPageFetcherTests'
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR for publishing
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Linux image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/tom-knighton/recipeparserapi:${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/Tom-Knighton/RecipeParserAPI
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Apply Discovery migrations
+        env:
+          ConnectionStrings__Discovery: ${{ secrets.DISCOVERY_CONNECTION_STRING }}
+          Discovery__RunCuratedCandidateSyncOnStartup: 'false'
+          Discovery__RunSourceCandidateSyncOnStartup: 'false'
+        run: |
+          dotnet tool install dotnet-ef --tool-path "$RUNNER_TEMP/ef" --version 10.0.4
+          "$RUNNER_TEMP/ef/dotnet-ef" database update \
+            --project RecipeParser.Infrastructure/RecipeParser.Infrastructure.csproj \
+            --startup-project RecipeParser.API/RecipeParser.API.csproj \
+            --context DiscoveryDbContext --configuration Release
+
+      - name: Log in to Azure with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy and verify revision
+        env:
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
+          DISCOVERY_CONNECTION_STRING: ${{ secrets.DISCOVERY_CONNECTION_STRING }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEPLOY_IMAGE: ghcr.io/tom-knighton/recipeparserapi@${{ steps.image.outputs.digest }}
+        run: python3 scripts/deploy-azure.py "$DEPLOY_ENVIRONMENT"
