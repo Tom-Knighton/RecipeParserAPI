@@ -7,7 +7,7 @@ The API runs on Azure Container Apps in UK West. Images remain private in GHCR.
 | Development | `develop` | `rg-sporkast-dev` | `dev-sporkast-api` | `env-sporkast-dev` | `api.dev.sporkast.tomk.online` |
 | Production | `main` | `rg-sporkast-prod` | `prod-sporkast-api` | `env-sporkast-prod` | `api.sporkast.tomk.online` |
 
-`.github/workflows/azure-deploy.yml` runs on pushes to these branches. A manual run deploys the selected branch to the explicitly selected environment; use a reviewed release commit for production. The workflow must be merged into the default branch before GitHub exposes its manual-run button. The CLI can dispatch it on another branch once registered.
+The **Deploy API to Azure** workflow runs on pushes to these branches. It retains the registered legacy dev workflow filename so it can be dispatched before this change reaches the default branch. A manual run deploys the selected branch to the explicitly selected environment; use a reviewed release commit for production. The CLI can dispatch the registered workflow on the deployment branch; GitHub’s manual-run button follows the default branch configuration.
 
 Development scales to zero with a maximum of two replicas. Production keeps one replica warm and scales to two. Each replica has one CPU and 2 GiB of memory. Production has a separate Azure environment and Log Analytics workspace.
 
