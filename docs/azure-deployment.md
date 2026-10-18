@@ -4,8 +4,10 @@ The API runs on Azure Container Apps in UK West. Images remain private in GHCR.
 
 | Environment | Branch | Resource group | Container App | Azure environment | Custom hostname |
 | --- | --- | --- | --- | --- | --- |
-| Development | `develop` | `rg-sporkast-dev` | `dev-sporkast-api` | `env-sporkast-dev` | `api.dev.sporkast.tomk.online` |
+| Development (Azure) | `develop` | `rg-sporkast-dev` | `dev-sporkast-api` | `env-sporkast-dev` | `api.dev.recipe.tomk.online` |
 | Production | `main` | `rg-sporkast-prod` | `prod-sporkast-api` | `env-sporkast-prod` | `api.sporkast.tomk.online` |
+
+`api.dev.sporkast.tomk.online` intentionally remains on Railway. Its deployment and DNS record are independent of this Azure workflow.
 
 The **Deploy API to Azure** workflow runs on pushes to these branches. It retains the registered legacy dev workflow filename so it can be dispatched before this change reaches the default branch. A manual run deploys the selected branch to the explicitly selected environment; use a reviewed release commit for production. The CLI can dispatch the registered workflow on the deployment branch; GitHub’s manual-run button follows the default branch configuration.
 
@@ -76,7 +78,7 @@ az containerapp hostname bind -n prod-sporkast-api -g rg-sporkast-prod \
   --hostname api.sporkast.tomk.online --environment env-sporkast-prod --validation-method CNAME
 ```
 
-Repeat for development's `api.dev.sporkast.tomk.online`. Its older `api.dev.recipe.tomk.online` binding can remain during migration. Verify `/health/ready` over each custom hostname after binding. Set the iOS production build variable `SPORKCAST_CI_API_URL` to `https://api.sporkast.tomk.online/` after production verification.
+Development keeps its existing `api.dev.recipe.tomk.online` Azure binding. Verify `/health/ready` over each Azure custom hostname after binding. Set the iOS production build variable `SPORKCAST_CI_API_URL` to `https://api.sporkast.tomk.online/` after production verification. The iOS development API remains on Railway at `https://api.dev.sporkast.tomk.online/`.
 
 ## Diagnosed legacy failure
 
