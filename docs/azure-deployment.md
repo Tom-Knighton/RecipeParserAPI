@@ -99,3 +99,11 @@ Development keeps its existing `api.dev.recipe.tomk.online` Azure binding. Verif
 On 18 October 2026, the existing `develop` GitHub workflow failed GHCR login with `denied: denied`. Azure revisions failed with `ImagePullBackOff` and a 403 while requesting a GHCR pull token. The stored registry credential was rejected; the service's old image tag itself was not sufficient to keep it running because Azure must authenticate on future pulls. The provider does not disclose whether the token expired, was revoked, or lost permissions.
 
 The old `main` workflow referenced a removed ACR and a removed development app. It was not a production deployment. The replacement workflow explicitly maps `main` to production and `develop` to development.
+
+On 19 October, the existing development Postgres container was also found stopped. It was started again, and the verified Supavisor tenant names above were used to configure both GitHub environments. Both Azure deployments passed database readiness checks and a real recipe import using the same image digest. The Railway hostname and service configuration were preserved.
+
+## Existing hardening gaps
+
+Both self-hosted Supavisor endpoints currently reject PostgreSQL TLS negotiation (`N` response to SSLRequest). The database connection therefore crosses the public network without transport encryption. Configure verified TLS on the poolers or private connectivity for production database traffic; the HTTPS certificate on the API protects the client-to-API connection only.
+
+The image build also reports NU1902 for the existing AngleSharp 1.3.0 dependency. [GHSA-pgww-w46g-26qg](https://github.com/advisories/GHSA-pgww-w46g-26qg) is patched in 1.5.0. The advisory concerns HTML parsing and sanitizer bypasses; this deployment does not establish whether the application's use is exploitable. Upgrade and run the recipe extraction regression tests separately.
