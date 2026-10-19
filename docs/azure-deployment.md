@@ -21,7 +21,7 @@ Development scales to zero with a maximum of two replicas. Production keeps one 
 
 GitHub Actions publishes using its automatically issued `GITHUB_TOKEN` with `packages: write`. The GHCR package must grant this repository Actions write access under its package settings. The image carries the repository source label to associate newly published packages with the repository.
 
-Azure pulls images using a separate classic GitHub PAT with only `read:packages`. Fine-grained PATs are not supported by GHCR. Choose an expiry and rotate before that date. The PAT owner must have read access to `tom-knighton/recipeparserapi`. If the package requires organization SSO, authorize the token for that organization too.
+Azure pulls images using a separate classic GitHub PAT with only `read:packages`. Fine-grained PATs are not supported by GHCR. Choose an expiry and rotate before that date. The credential verified on 19 October 2026 expires at 23:00 UTC on 17 October 2027 (18 October in the UK); update this record when rotating it. The PAT owner must have read access to `tom-knighton/recipeparserapi`. If the package requires organization SSO, authorize the token for that organization too.
 
 Set the shared pull token through a secure terminal prompt:
 
