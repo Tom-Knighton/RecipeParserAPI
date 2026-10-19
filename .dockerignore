@@ -1,0 +1,15 @@
+.git
+.github
+.idea
+**/bin
+**/obj
+**/node_modules
+**/__pycache__
+**/.DS_Store
+.env
+.env.*
+**/appsettings.*.json
+!RecipeParser.API/appsettings.Development.json
+out
+TestResults
+RecipeParser.Services.UnitTests

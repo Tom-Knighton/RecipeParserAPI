@@ -1,48 +1,141 @@
-name: Trigger auto deployment for dev-sporkast-api
+name: Deploy API to Azure
 
-# When this action will be executed
 on:
-  # Automatically trigger it when detected changes in repo
   push:
-    branches: 
-      [ develop ]
-    paths:
-    - '**'
-    - '.github/workflows/dev-sporkast-api-AutoDeployTrigger-002a903f-9727-453d-832b-0cf9b9da6a17.yml'
-
-  # Allow manual trigger 
+    branches: [develop, main]
   workflow_dispatch:
-      
+    inputs:
+      environment:
+        description: Target environment (deploys the selected branch)
+        type: choice
+        options: [development, production]
+        default: development
+        required: true
+      image_digest:
+        description: Existing SHA256 image digest to promote (leave blank to build)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: azure-${{ inputs.environment || (github.ref_name == 'main' && 'production' || 'development') }}
+  cancel-in-progress: false
+
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 45
+    environment: ${{ inputs.environment || (github.ref_name == 'main' && 'production' || 'development') }}
+    env:
+      DEPLOY_ENVIRONMENT: ${{ inputs.environment || (github.ref_name == 'main' && 'production' || 'development') }}
     steps:
-      - name: Checkout to the branch
-        uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - name: Azure Login
+      - name: Test deployment configuration
+        run: python3 scripts/test-deploy-azure.py
+
+      - name: Validate deployment configuration
+        env:
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          DISCOVERY_CONNECTION_STRING: ${{ secrets.DISCOVERY_CONNECTION_STRING }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+        run: |
+          for name in GHCR_READ_TOKEN DISCOVERY_CONNECTION_STRING AZURE_CLIENT_ID GHCR_USERNAME; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing $name for $DEPLOY_ENVIRONMENT"
+              exit 1
+            fi
+          done
+          if [[ -n "$IMAGE_DIGEST" && ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo '::error::image_digest must be a SHA256 digest'
+            exit 1
+          fi
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test deployment dependencies
+        run: >-
+          dotnet test RecipeParser.Services.UnitTests/RecipeParser.Services.UnitTests.csproj
+          --configuration Release
+          --filter 'FullyQualifiedName~ParserPerformanceTests|FullyQualifiedName~DiscoveryServiceTests|FullyQualifiedName~PlaywrightPageFetcherTests'
+
+      - uses: docker/setup-buildx-action@v3
+        if: inputs.image_digest == ''
+
+      - name: Log in to GHCR for publishing
+        if: inputs.image_digest == ''
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Linux image
+        if: inputs.image_digest == ''
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/tom-knighton/recipeparserapi:${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/Tom-Knighton/RecipeParserAPI
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Log in to Azure with OIDC
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.DEVSPORKASTAPI_AZURE_CREDENTIALS }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Build and push container image to registry
-        uses: azure/container-apps-deploy-action@v2
-        with:
-          appSourcePath: ${{ github.workspace }}
-          _dockerfilePathKey_: _dockerfilePath_
-          _targetLabelKey_: _targetLabel_
-          registryUrl: ghcr.io
-          registryUsername: ${{ secrets.DEVSPORKASTAPI_REGISTRY_USERNAME }}
-          registryPassword: ${{ secrets.DEVSPORKASTAPI_REGISTRY_PASSWORD }}
-          containerAppName: dev-sporkast-api
-          resourceGroup: rg-sporkast-dev
-          imageToBuild: ghcr.io/tom-knighton/recipeparserapi:${{ github.sha }}
-          
-            
+      - name: Refresh existing app registry credentials
+        env:
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
+        run: |
+          if [ "$DEPLOY_ENVIRONMENT" = production ]; then
+            app=prod-sporkast-api
+            group=rg-sporkast-prod
+          else
+            app=dev-sporkast-api
+            group=rg-sporkast-dev
+          fi
+          existing=$(az containerapp list --resource-group "$group" --query "[?name=='$app'].name | [0]" -o tsv)
+          if [ -n "$existing" ]; then
+            az containerapp registry set --name "$app" --resource-group "$group" \
+              --server ghcr.io --username "$GHCR_USERNAME" --password "$GHCR_READ_TOKEN" --output none
+          fi
 
-     
+      - name: Apply Discovery migrations
+        env:
+          ConnectionStrings__Discovery: ${{ secrets.DISCOVERY_CONNECTION_STRING }}
+          Discovery__RunCuratedCandidateSyncOnStartup: 'false'
+          Discovery__RunSourceCandidateSyncOnStartup: 'false'
+        run: |
+          dotnet restore RecipeParser.API/RecipeParser.API.csproj
+          dotnet tool install dotnet-ef --tool-path "$RUNNER_TEMP/ef" --version 10.0.4
+          "$RUNNER_TEMP/ef/dotnet-ef" database update \
+            --project RecipeParser.Infrastructure/RecipeParser.Infrastructure.csproj \
+            --startup-project RecipeParser.API/RecipeParser.API.csproj \
+            --context DiscoveryDbContext --configuration Release
 
-
-
-
+      - name: Deploy and verify revision
+        env:
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
+          DISCOVERY_CONNECTION_STRING: ${{ secrets.DISCOVERY_CONNECTION_STRING }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          DEPLOY_IMAGE: ghcr.io/tom-knighton/recipeparserapi@${{ inputs.image_digest || steps.image.outputs.digest }}
+        run: python3 scripts/deploy-azure.py "$DEPLOY_ENVIRONMENT"
