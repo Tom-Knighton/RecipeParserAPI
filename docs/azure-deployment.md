@@ -11,6 +11,8 @@ The API runs on Azure Container Apps in UK West. Images remain private in GHCR.
 
 The **Deploy API to Azure** workflow runs on pushes to these branches. It retains the registered legacy dev workflow filename so it can be dispatched before this change reaches the default branch. A manual run deploys the selected branch to the explicitly selected environment; use a reviewed release commit for production. The CLI can dispatch the registered workflow on the deployment branch; GitHub’s manual-run button follows the default branch configuration.
 
+Manual runs can supply `image_digest` to promote an existing image from this GHCR package. Use the digest recorded by a verified development deployment to release the exact same image to production. Leaving it blank builds the selected source ref. Promotion still runs deployment checks and database migrations from the selected source ref, which must match the release being promoted.
+
 Development scales to zero with a maximum of two replicas. Production keeps one replica warm and scales to two. Each replica has one CPU and 2 GiB of memory. Production has a separate Azure environment and Log Analytics workspace.
 
 ## Authentication and secrets
