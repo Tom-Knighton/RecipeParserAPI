@@ -13,6 +13,8 @@ The **Deploy API to Azure** workflow runs on pushes to these branches. It retain
 
 Manual runs can supply `image_digest` to promote an existing image from this GHCR package. Use the digest recorded by a verified development deployment to release the exact same image to production. Leaving it blank builds the selected source ref. Promotion still runs deployment checks and database migrations from the selected source ref, which must match the release being promoted.
 
+GitHub environment policies restrict development to `develop` and production to `main`. The bootstrap branch `codex/azure-production-pipeline` is temporarily allowed in both environments while the deployment changes await review; remove these two bootstrap exceptions after merging and promoting the release.
+
 Development scales to zero with a maximum of two replicas. Production keeps one replica warm and scales to two. Each replica has one CPU and 2 GiB of memory. Production has a separate Azure environment and Log Analytics workspace.
 
 ## Authentication and secrets
@@ -33,6 +35,15 @@ Set separate Discovery database connection strings in GitHub's `development` and
 gh secret set DISCOVERY_CONNECTION_STRING --repo Tom-Knighton/RecipeParserAPI --env development
 gh secret set DISCOVERY_CONNECTION_STRING --repo Tom-Knighton/RecipeParserAPI --env production
 ```
+
+These self-hosted endpoints use Supavisor session pooling, so their usernames include the configured tenant identifier:
+
+| Environment | Host | Port | Username |
+| --- | --- | --- | --- |
+| Development | `db.sporkast.dev.tomk.online` | `15432` | `postgres.sporkast-bc-dev` |
+| Production | `db.sporkast.tomk.online` | `15433` | `postgres.sporkast-prd` |
+
+Keep passwords in the secret store. A missing tenant identifier or a stopped upstream Postgres container can surface as a closed authentication stream. Check the relevant database and pooler container health before rotating a valid database password.
 
 For OpenAI-assisted parsing, set `OPENAI_API_KEY` separately in each environment. Never place database strings or tokens in a workflow, checked-in settings file, shell history, or chat.
 
