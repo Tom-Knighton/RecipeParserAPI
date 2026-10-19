@@ -44,6 +44,7 @@ Azure login uses OIDC through environment-scoped user-assigned identities. It do
 - `AZURE_TENANT_ID`
 - `AZURE_SUBSCRIPTION_ID`
 - `GHCR_USERNAME`
+- `OPENAI_MODEL` (the existing Railway API uses `gpt-5.4-mini`)
 
 ## Release verification
 

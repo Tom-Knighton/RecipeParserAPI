@@ -89,6 +89,8 @@ def main():
     variables["ConnectionStrings__Discovery"] = {"name": "ConnectionStrings__Discovery", "secretRef": "discovery-database"}
     if "openai-api-key" in secrets:
         variables["OpenAI__ApiKey"] = {"name": "OpenAI__ApiKey", "secretRef": "openai-api-key"}
+    if os.environ.get("OPENAI_MODEL"):
+        variables["OpenAI__Model"] = {"name": "OpenAI__Model", "value": os.environ["OPENAI_MODEL"]}
     container["env"] = list(variables.values())
     container["probes"] = [
         {"type": kind, "httpGet": {"path": path, "port": 8080, "scheme": "HTTP"},
