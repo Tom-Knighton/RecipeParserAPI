@@ -7,7 +7,7 @@ The API runs on Azure Container Apps in UK West. Images remain private in GHCR.
 | Development (Azure) | `develop` | `rg-sporkast-dev` | `dev-sporkast-api` | `env-sporkast-dev` | `api.dev.recipe.tomk.online` |
 | Production | `main` | `rg-sporkast-prod` | `prod-sporkast-api` | `env-sporkast-prod` | `api.sporkast.tomk.online` |
 
-`api.dev.sporkast.tomk.online` intentionally remains on Railway. Its deployment and DNS record are independent of this Azure workflow.
+`api.dev.sporkast.tomk.online` is also bound to the Azure development app for compatibility with installed builds that used Railway. New development builds use `api.dev.recipe.tomk.online` directly. Both hostnames serve the same Azure app; Railway is retired.
 
 The **Deploy API to Azure** workflow runs on pushes to these branches. It retains the registered legacy dev workflow filename so it can be dispatched before this change reaches the default branch. A manual run deploys the selected branch to the explicitly selected environment; use a reviewed release commit for production. The CLI can dispatch the registered workflow on the deployment branch; GitHub’s manual-run button follows the default branch configuration.
 
@@ -92,7 +92,7 @@ az containerapp hostname bind -n prod-sporkast-api -g rg-sporkast-prod \
   --hostname api.sporkast.tomk.online --environment env-sporkast-prod --validation-method HTTP
 ```
 
-Development keeps its existing `api.dev.recipe.tomk.online` Azure binding. Verify `/health/ready` over each Azure custom hostname after binding. Set the iOS production build variable `SPORKCAST_CI_API_URL` to `https://api.sporkast.tomk.online/` after production verification. The iOS development API remains on Railway at `https://api.dev.sporkast.tomk.online/`.
+Development keeps its existing `api.dev.recipe.tomk.online` Azure binding. Its legacy `api.dev.sporkast.tomk.online` hostname uses a DNS-only A record pointing to `20.254.210.169`, an API-specific DigiCert CAA record, the matching `asuid` TXT record, and an HTTP-validated managed certificate. Keep dev running while issuing a certificate; temporarily set its minimum replicas to one if it has scaled to zero, then restore zero after HTTPS verification. Verify `/health/ready` over each Azure custom hostname after binding. Set the iOS production build variable `SPORKCAST_CI_API_URL` to `https://api.sporkast.tomk.online/` after production verification. The iOS development API is `https://api.dev.recipe.tomk.online/`. The legacy `https://api.dev.sporkast.tomk.online/` hostname also serves Azure for existing installations.
 
 ## Diagnosed legacy failure
 
@@ -100,7 +100,7 @@ On 18 October 2026, the existing `develop` GitHub workflow failed GHCR login wit
 
 The old `main` workflow referenced a removed ACR and a removed development app. It was not a production deployment. The replacement workflow explicitly maps `main` to production and `develop` to development.
 
-On 19 October, the existing development Postgres container was also found stopped. It was started again, and the verified Supavisor tenant names above were used to configure both GitHub environments. Both Azure deployments passed database readiness checks and a real recipe import using the same image digest. The Railway hostname and service configuration were preserved.
+On 19 October, the existing development Postgres container was also found stopped. It was started again, and the verified Supavisor tenant names above were used to configure both GitHub environments. Both Azure deployments passed database readiness checks and a real recipe import using the same image digest. The Railway hostname and service configuration were preserved during the initial deployment. A later cutover moved the legacy dev hostname to Azure and retired Railway.
 
 ## Database TLS and certificate renewal
 
