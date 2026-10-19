@@ -84,12 +84,12 @@ az containerapp show -n prod-sporkast-api -g rg-sporkast-prod \
   --query '{fqdn:properties.configuration.ingress.fqdn,verificationId:properties.customDomainVerificationId}'
 ```
 
-Create a DNS-only CNAME for `api.sporkast.tomk.online` pointing to the FQDN, and a TXT record at `asuid.api.sporkast.tomk.online` containing the verification ID. Keep Cloudflare proxying disabled while Azure validates and issues its managed certificate. Bind the hostname:
+Production uses a DNS-only A record for `api.sporkast.tomk.online` pointing to the environment’s static IP (`20.90.40.159`), a CAA record at that same hostname with `0 issue "digicert.com"`, and a TXT record at `asuid.api.sporkast.tomk.online` containing the verification ID. The parent `sporkast.tomk.online` CNAME resolves to Vercel CAA records that exclude DigiCert; the API-specific CAA record overrides that inherited policy. A CNAME cannot coexist with a CAA record at the same hostname, so production uses an A record and HTTP validation. Keep Cloudflare proxying disabled for Azure validation and renewal. If the Azure environment is recreated, update the A record to its new static IP. Bind the hostname:
 
 ```sh
 az containerapp hostname add -n prod-sporkast-api -g rg-sporkast-prod --hostname api.sporkast.tomk.online
 az containerapp hostname bind -n prod-sporkast-api -g rg-sporkast-prod \
-  --hostname api.sporkast.tomk.online --environment env-sporkast-prod --validation-method CNAME
+  --hostname api.sporkast.tomk.online --environment env-sporkast-prod --validation-method HTTP
 ```
 
 Development keeps its existing `api.dev.recipe.tomk.online` Azure binding. Verify `/health/ready` over each Azure custom hostname after binding. Set the iOS production build variable `SPORKCAST_CI_API_URL` to `https://api.sporkast.tomk.online/` after production verification. The iOS development API remains on Railway at `https://api.dev.sporkast.tomk.online/`.
@@ -102,8 +102,19 @@ The old `main` workflow referenced a removed ACR and a removed development app. 
 
 On 19 October, the existing development Postgres container was also found stopped. It was started again, and the verified Supavisor tenant names above were used to configure both GitHub environments. Both Azure deployments passed database readiness checks and a real recipe import using the same image digest. The Railway hostname and service configuration were preserved.
 
-## Existing hardening gaps
+## Database TLS and certificate renewal
 
-Both self-hosted Supavisor endpoints currently reject PostgreSQL TLS negotiation (`N` response to SSLRequest). The database connection therefore crosses the public network without transport encryption. Configure verified TLS on the poolers or private connectivity for production database traffic; the HTTPS certificate on the API protects the client-to-API connection only.
+Both Supavisor poolers serve the existing, publicly trusted Let’s Encrypt certificates for their database hostnames. Discovery connection strings in both GitHub environments and Azure require `SSL Mode=VerifyFull`, validating the hostname and certificate chain. Keep this setting when rotating database credentials. TLS terminates at Supavisor; its connection to Postgres remains on the server’s Docker network. Other existing pooler clients have not been forced to enable TLS.
 
-The image build also reports NU1902 for the existing AngleSharp 1.3.0 dependency. [GHSA-pgww-w46g-26qg](https://github.com/advisories/GHSA-pgww-w46g-26qg) is patched in 1.5.0. The advisory concerns HTML parsing and sanitizer bypasses; this deployment does not establish whether the application's use is exploitable. Upgrade and run the recipe extraction regression tests separately.
+On the database server (`188.165.252.22`), `/home/tomk/sporkast-db-tls/` contains a copy of `scripts/sync-pooler-certificates.py`, a hostname/container configuration, and certificate directories with owner-only permissions. The script extracts only the two database certificates from the existing Traefik ACME store through Docker, checks their hostnames, expiry and matching keys, and restarts only the relevant pooler when its certificate changes. Existing Traefik renewal continues to manage issuance. The `tomk` user’s cron runs synchronization every six hours; logs are in the same directory. It does not request a new certificate or expose private keys in output.
+
+The dev and production Compose environment overrides mount their respective certificate directory read-only at `/etc/pooler/tls` and configure `GLOBAL_DOWNSTREAM_CERT_PATH` / `GLOBAL_DOWNSTREAM_KEY_PATH`. Backups ending `.before-pooler-tls` preserve the previous overrides. Do not remove the certificate directory while pooler TLS is enabled. Restore the matching override backup and recreate only `supavisor` if reverting TLS, and coordinate client connection strings before doing so.
+
+Check renewal without changing files or restarting services:
+
+```sh
+python3 /home/tomk/sporkast-db-tls/sync-pooler-certificates.py \
+  --config /home/tomk/sporkast-db-tls/config.json --check
+```
+
+AngleSharp is upgraded to 1.5.0 in both projects to address [GHSA-pgww-w46g-26qg](https://github.com/advisories/GHSA-pgww-w46g-26qg). Twenty-two focused and extraction tests passed. Full recipe output from saved BBC and Beat the Budget HTML snapshots was identical on 1.3.0 and 1.5.0. Live-site assertions can vary with publisher review content; the existing Beat the Budget review-text assertion failed identically on both versions.
